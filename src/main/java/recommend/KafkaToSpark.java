@@ -13,16 +13,40 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
 
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.common.serialization.StringDeserializer;
 
 import org.apache.spark.SparkConf;
 import org.apache.spark.streaming.api.java.*;
-import org.apache.spark.streaming.kafka010.ConsumerStrategies;
-import org.apache.spark.streaming.kafka010.KafkaUtils;
-import org.apache.spark.streaming.kafka010.LocationStrategies;
 import org.apache.spark.streaming.Durations;
+import kafka.serializer.StringDecoder;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.function.Function;
+import org.apache.spark.api.java.function.VoidFunction;
+import org.apache.spark.mllib.recommendation.ALS;
+import org.apache.spark.mllib.recommendation.MatrixFactorizationModel;
+import org.apache.spark.mllib.recommendation.Rating;
+import org.apache.spark.rdd.RDD;
+import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaDStream;
+import org.apache.spark.streaming.api.java.JavaPairInputDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import org.apache.spark.streaming.kafka.KafkaUtils;
+
+import kafka.serializer.StringDecoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import scala.Tuple2;
 
 public class KafkaToSpark {
 
@@ -30,48 +54,120 @@ public class KafkaToSpark {
 
     private static final Pattern SPACE = Pattern.compile(" ");
 
-    public static void main(String[] args) throws Exception {
-        if (args.length < 3) {
-            System.err.println("Usage: JavaDirectKafkaWordCount <brokers> <groupId> <topics>\n" +
-                    "  <brokers> is a list of one or more Kafka brokers\n" +
-                    "  <groupId> is a consumer group name to consume from topics\n" +
-                    "  <topics> is a list of one or more kafka topics to consume from\n\n");
-            System.exit(1);
-        }
+    private static final String KAFKA_ADDR = "localhost:9092";
+    private static final String TOPIC = "recommend";
+    private static final String HDFS_ADDR = "hdfs://localhost:9000";
 
-        // WINDOWS特殊处理
-        System.setProperty("hadoop.home.dir", "D:\\soft\\windows");
+    private static final String MODEL_PATH = "/spark-als/model";
 
-        String brokers = args[0];
-        String groupId = args[1];
-        String topics = args[2];
 
-        // Create context with a 2 seconds batch interval
-        SparkConf sparkConf = new SparkConf().setAppName("recommend.KafkaToSpark").setMaster("spark://192.168.80.128:7077").setJars(new String[]{"D:\\repo\\recommend\\recommend\\out\\artifacts\\recommend_jar\\recommend.jar"});
-        JavaStreamingContext jssc = new JavaStreamingContext(sparkConf, Durations.seconds(2));
+    //	基于Hadoop、Flume、Kafka、spark-streaming、logback、商城系统的实时推荐系统DEMO
+    //	Real time recommendation system DEMO based on Hadoop, Flume, Kafka, spark-streaming, logback and mall system
+    //	商城系统采集的数据集格式 Data Format:
+    //	用户ID，商品ID，用户行为评分，时间戳
+    //	UserID,ItemId,Rating,TimeStamp
+    //	53,1286513,9,1508221762
+    //	53,1172348420,9,1508221762
+    //	53,1179495514,12,1508221762
+    //	53,1184890730,3,1508221762
+    //	53,1210793742,159,1508221762
+    //	53,1215837445,9,1508221762
 
-        Set<String> topicsSet = new HashSet<>(Arrays.asList(topics.split(",")));
-        Map<String, Object> kafkaParams = new HashMap<>();
-        kafkaParams.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
-        kafkaParams.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-        kafkaParams.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        kafkaParams.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+    public static void main(String[] args) {
+        System.setProperty("HADOOP_USER_NAME", "zhangni"); // 设置权限用户
+
+        SparkConf sparkConf = new SparkConf().setAppName("JavaKafkaDirectWordCount").setMaster("local[*]");
+
+        final JavaStreamingContext jssc = new JavaStreamingContext(sparkConf, Durations.seconds(6));
+
+        Map<String, String> kafkaParams = new HashMap<String, String>(); // key是topic名称,value是线程数量
+        kafkaParams.put("metadata.broker.list", KAFKA_ADDR); // 指定broker在哪
+        HashSet<String> topicsSet = new HashSet<String>();
+        topicsSet.add(TOPIC); // 指定操作的topic
 
         // Create direct kafka stream with brokers and topics
-        JavaInputDStream<ConsumerRecord<String, String>> messages = KafkaUtils.createDirectStream(
-                jssc,
-                LocationStrategies.PreferConsistent(),
-                ConsumerStrategies.Subscribe(topicsSet, kafkaParams));
+        // createDirectStream()
+        JavaPairInputDStream<String, String> messages = KafkaUtils.createDirectStream(jssc, String.class, String.class,
+                StringDecoder.class, StringDecoder.class, kafkaParams, topicsSet);
 
-        // Get the lines, split them into words, count the words and print
-        JavaDStream<String> lines = messages.map(ConsumerRecord::value);
-        JavaDStream<String> words = lines.flatMap(x -> Arrays.asList(SPACE.split(x)).iterator());
-        JavaPairDStream<String, Integer> wordCounts = words.mapToPair(s -> new Tuple2<>(s, 1))
-                .reduceByKey((i1, i2) -> i1 + i2);
-        wordCounts.print();
+        JavaDStream<String> lines = messages.map(new Function<Tuple2<String, String>, String>() {
+            public String call(Tuple2<String, String> tuple2) {
+                return tuple2._2();
+            }
+        });
 
-        // Start the computation
+        JavaDStream<Rating> ratingsStream = lines.map(new Function<String, Rating>() {
+            public Rating call(String s) {
+                String[] sarray = StringUtils.split(StringUtils.trim(s), ",");
+                return new Rating(Integer.parseInt(sarray[0]), Integer.parseInt(sarray[1]),
+                        Double.parseDouble(sarray[2]));
+            }
+        });
+
+        // 进行流推荐计算
+        ratingsStream.foreachRDD(new VoidFunction<JavaRDD<Rating>>() {
+
+            public void call(JavaRDD<Rating> ratings) throws Exception {
+                //  获取到原始的数据集
+                SparkContext sc = ratings.context();
+
+                RDD<String> textFileRDD = sc.textFile(HDFS_ADDR + "/flume/logs", 3); // 读取原始数据集文件
+                JavaRDD<String> originalTextFile = textFileRDD.toJavaRDD();
+
+                final JavaRDD<Rating> originaldatas = originalTextFile.map(new Function<String, Rating>() {
+                    public Rating call(String s) {
+                        String[] sarray = StringUtils.split(StringUtils.trim(s), ",");
+                        return new Rating(Integer.parseInt(sarray[0]), Integer.parseInt(sarray[1]),
+                                Double.parseDouble(sarray[2]));
+                    }
+                });
+                log.info("========================================");
+                log.info("Original TextFile Count:{}", originalTextFile.count()); // HDFS中已经存储的原始用户行为日志数据
+                log.info("========================================");
+
+                //  将原始数据集和新的用户行为数据进行合并
+                JavaRDD<Rating> calculations = originaldatas.union(ratings);
+
+                log.info("Calc Count:{}", calculations.count());
+
+                // Build the recommendation model using ALS
+                int rank = 10; // 模型中隐语义因子的个数
+                int numIterations = 6; // 训练次数
+
+                // 得到训练模型
+                if (!ratings.isEmpty()) { // 如果有用户行为数据
+                    MatrixFactorizationModel model = ALS.train(JavaRDD.toRDD(calculations), rank, numIterations, 0.01);
+                    //  判断文件是否存在,如果存在 删除文件目录
+                    Configuration hadoopConfiguration = sc.hadoopConfiguration();
+                    hadoopConfiguration.set("fs.defaultFS", HDFS_ADDR);
+                    FileSystem fs = FileSystem.get(hadoopConfiguration);
+                    Path outpath = new Path(MODEL_PATH);
+                    if (fs.exists(outpath)) {
+                        log.info("########### 删除" + outpath.getName() + " ###########");
+                        fs.delete(outpath, true);
+                    }
+
+                    // 保存model
+                    model.save(sc, HDFS_ADDR + MODEL_PATH);
+
+                    //  读取model
+                    MatrixFactorizationModel modelLoad = MatrixFactorizationModel.load(sc, HDFS_ADDR + MODEL_PATH);
+                    // 为指定用户推荐10个商品(电影)
+                    for(int userId=0;userId<30;userId++){ // streaming_sample_movielens_ratings.txt
+                        Rating[] recommendProducts = modelLoad.recommendProducts(userId, 10);
+                        log.info("get recommend result:{}", Arrays.toString(recommendProducts));
+                    }
+                }
+
+            }
+        });
+
         jssc.start();
-        jssc.awaitTermination();
+        try {
+            jssc.awaitTermination();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
     }
 }
