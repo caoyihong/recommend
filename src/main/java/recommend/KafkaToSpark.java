@@ -67,26 +67,21 @@ public class KafkaToSpark {
     //	用户ID，商品ID，用户行为评分，时间戳
     //	UserID,ItemId,Rating,TimeStamp
     //	53,1286513,9,1508221762
-    //	53,1172348420,9,1508221762
-    //	53,1179495514,12,1508221762
-    //	53,1184890730,3,1508221762
-    //	53,1210793742,159,1508221762
-    //	53,1215837445,9,1508221762
 
     public static void main(String[] args) {
         System.setProperty("HADOOP_USER_NAME", "zhangni"); // 设置权限用户
 
+        // 连接spark
         SparkConf sparkConf = new SparkConf().setAppName("JavaKafkaDirectWordCount").setMaster("local[*]");
 
         final JavaStreamingContext jssc = new JavaStreamingContext(sparkConf, Durations.seconds(6));
 
-        Map<String, String> kafkaParams = new HashMap<String, String>(); // key是topic名称,value是线程数量
-        kafkaParams.put("metadata.broker.list", KAFKA_ADDR); // 指定broker在哪
+        Map<String, String> kafkaParams = new HashMap<String, String>();
+        kafkaParams.put("metadata.broker.list", KAFKA_ADDR);
         HashSet<String> topicsSet = new HashSet<String>();
         topicsSet.add(TOPIC); // 指定操作的topic
 
-        // Create direct kafka stream with brokers and topics
-        // createDirectStream()
+        // spark direct方式直连 kafka
         JavaPairInputDStream<String, String> messages = KafkaUtils.createDirectStream(jssc, String.class, String.class,
                 StringDecoder.class, StringDecoder.class, kafkaParams, topicsSet);
 
@@ -95,7 +90,7 @@ public class KafkaToSpark {
                 return tuple2._2();
             }
         });
-
+        // kafka数据格式  用户ID,商品ID,评分
         JavaDStream<Rating> ratingsStream = lines.map(new Function<String, Rating>() {
             public Rating call(String s) {
                 String[] sarray = StringUtils.split(StringUtils.trim(s), ",");
@@ -155,7 +150,9 @@ public class KafkaToSpark {
                     // 为指定用户推荐10个商品(电影)
                     for(int userId=0;userId<30;userId++){ // streaming_sample_movielens_ratings.txt
                         Rating[] recommendProducts = modelLoad.recommendProducts(userId, 10);
-                        log.info("get recommend result:{}", Arrays.toString(recommendProducts));
+//                        log.info("get recommend result:{}", Arrays.toString(recommendProducts));
+                        System.out.println("get recommend result:");
+                        System.out.println(Arrays.toString(recommendProducts));
                     }
                 }
 
